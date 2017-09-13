@@ -72,15 +72,15 @@ import numpy as np
 
 # load from global array
 if MPI.COMM_WORLD.Get_rank() == 0:
-    global_arr = np.zeros((5, 5))
+    arr = np.zeros((5, 5))
 else:
-    global_arr = None
-mpiarray = MpiArray.fromglobalarray(global_arr)
+    arr = None
+mpiarray = MpiArray(arr)
 
 # load from local arrays
-local_arr = np.zeros((5, 5))
-mpiarray = MpiArray.fromlocalarrays(local_arr, axis=0)
-
+arr = np.zeros((5, 5))
+mpiarray = MpiArray(arr, axis=0)
+# NOTE: overall shape of mpiarray is (5*mpi_size, 5) in second example.
 
 The following data scatter/gather functions are supported:
 * scatter(axis, padding)
@@ -98,10 +98,8 @@ The following data scatter/gather functions are supported:
     ** splits data according to the distribution
     ** then moves distribution axis to axis 0.
     ** returns the local numpy array to every process
-* gather(root, delete_local)
-    ** gathers the full array on MPI process with rank root.  
-    ** delete_local=True removes the locally stored data if present.
-    ** returns the full array to root process
+* gather(root)
+    ** returns the full array on MPI process with rank root.  
 * gatherall()
     ** returns the full array to every process.
     
@@ -128,7 +126,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-__version__ = "1.0"
+__version__ = "2.0.a1"
 __author__ = "Michael Sutherland"
 __maintainer__ = "Michael Sutherland"
 __email__ = "michael.sutherland@dmea.osd.mil"
@@ -193,38 +191,32 @@ class Distribution(object):
 
 class MpiArray(object):
     
-    def __init__(self, global_arr=None, local_arr=None, axis=0, padding=0, 
-                 root=0, distribution=None, comm=None):
-        """Suggested to use fromglobalarray or fromlocalarrays to 
-        initialize MpiArray.  Initializing from a global array uses 
-        global_arr, root, and comm.  Initializing from local arrays uses 
-        local_arr, axis, padding, and comm.
+    def __init__(self, arr=None, axis=0, padding=0, distribution=None, 
+                 comm=None):
+        """Creates an MpiArray object to manage an ndarray accross multiple 
+        MPI processes.  The ndarrays can be combined from one or more MPI
+        process to create the full ndarray.  The distribution of the data
+        can be specified using axis and padding or through a Distribution
+        oject.
         
         Parameters
         ----------
-        global_arr : ndarray, optional
-            Global array of full dataset loaded on a single MPI process. 
-            Only used with global array loading.
-        local_arr : ndarray, optional
-            Local array of partial datasets loaded on each MPI process.
-            These arrays should already be split on a an axis with
-            padding.
+        arr : ndarray, optional
+            Portion of the ndarray present on MPI process.  If no portion
+            present on process, None is used.
         axis : int, optional
             Specifies the axis used to load distributed data. Only used 
-            with local array loading.  Defaults to zero.
+            if distribution not specified.  Defaults to zero.
         padding : int, optional
             Specifies the padding used to load distributed data.  This 
             is the overlap between the distributed data on each MPI 
-            process.  Only used with local array loading. Defaults to 
+            process.  Only used if distribution not specified. Defaults to 
             zero.
         distribution : Distribution, optional
             Class instance that sets how data is distributed.  
             Defines how the data is split along the axis among the 
             different MPI processes.  If not given, default Distribution 
             is constructed from axis and padding.
-        root : int, optinal
-            Rank of root node that has the global array of data.  Only 
-            used with global array loading.  Defaults to zero.
         comm : MPI Comm object, optional
             Comm object that defines MPI nodes and is used for 
             communication.  If not provided, COMM_WORLD is used.
@@ -236,45 +228,65 @@ class MpiArray(object):
         """
         # initialize variables
         self.comm = comm or MPI.COMM_WORLD # MPI comm, used to send/recv
-        self.global_arr = global_arr # full array, only stored on root mpi process when not distributed
-        self.local_arr = local_arr # local_arr, split along self.axis, stored on every node, with padding
+        self.arr = arr # locally stored ndarray
         self.distribution = distribution # class to specify how data distributed
-        self.root = root # root mpi_rank that stores full global_arr
-        self.shape = None # shape of the whole ndarray
-        self.dtype = None # dtype of ndarray
+        self.shape = None # shape of the whole ndarray           
         self._mpi_dtypes_subarray = {} # key is (shape, axis, size)
-        # calculate parameters for distributed array or global array
-        if self.local_arr is not None:
-            if self.distribution is None:
-                # calculate static distribution from current distribution
-                # get sizes from overall distribution
-                size = self.local_arr.shape[axis]
-                sizes = np.array(self.comm.allgather(size))
-                unpadded_sizes = sizes - padding
-                unpadded_sizes[1:-1] -= padding #no padding on edges
-                unpadded_sizes[unpadded_sizes<0] = 0
-                unpadded_offsets = np.zeros((self.mpi_size,), dtype=np.int)
-                unpadded_offsets[1:] = np.cumsum(unpadded_sizes[:-1])
-                offsets = unpadded_offsets
-                offsets[1:] -= padding
-                offsets[offsets<0] = 0
-                self.distribution = Distribution(axis, sizes, offsets, unpadded_sizes, 
-                                                 unpadded_offsets)
-            # calculate from local_arr sizes along axis
-            total_axis_size = np.sum(self.unpadded_sizes)
-            # use to calculate shape
-            self.shape = self._tuple_replace(local_arr.shape, total_axis_size, self.axis)
-            self.dtype = self.local_arr.dtype
+        # default to distribution axis
+        if distribution != None:
+            axis = distribution.axis
+        # get dtype and shape if arr defined
+        if self.arr is not None:
+            dtype = self.arr.dtype
+            shape = self.arr.shape
         else:
-            # take size from root rank that has array (usually zero) 
-            if self.global_arr is not None:
-                shape = global_arr.shape
-                dtype = global_arr.dtype
-            else:
-                shape = None
-                dtype = None
-            self.shape = self.comm.bcast(shape, root=root)
-            self.dtype = self.comm.bcast(dtype, root=root)
+            dtype = None
+            shape = None
+        # share dtype and ensure is None or the same for all nodes
+        dtypes = set(self.comm.allgather(dtype))
+        dtypes.discard(None)
+        if len(dtypes) != 1:
+            raise Exception("MpiArray initialized with different dtypes: %s"%(str(dtypes)))
+        dtype = dtypes.pop()
+        # share shape to check consistency and calculate overall size if needed
+        shapes = self.comm.allgather(shape)
+        try:
+            # check that non-axis shapes match
+            shapes_set = set((self._tuple_replace(shape, 0, axis) 
+                              for shape in shapes if shape is not None)) 
+            if len(shapes_set) != 1:
+                raise Exception("Shapes must be same for axis != %d"%axis)
+            empty_shape = shapes_set.pop()
+            if self.arr is None:
+                shape = empty_shape
+                self.arr = np.empty(shape, dtype=dtype) 
+        except Exception, e:
+            logger.error("MpiArray: Failure while verifying shapes: %s" % str(shapes))
+            raise e
+        
+        # create array of sizes
+        sizes = np.array([0 if s is None else s[axis] for s in shapes], np.int)
+        if self.distribution:
+            # verify unpadded sizes 
+            if not np.array_equal(sizes, self.distribution.sizes):
+                raise Exception("MpiArray: sizes doesn't match distribution %s vs %s" %
+                                (sizes, self.distribution.sizes))
+        else:
+            # create distribution
+            unpadded_sizes = sizes - padding
+            unpadded_sizes[1:-1] -= padding #no padding on edges
+            unpadded_sizes[unpadded_sizes<0] = 0
+            unpadded_offsets = np.zeros((self.mpi_size,), dtype=np.int)
+            unpadded_offsets[1:] = np.cumsum(unpadded_sizes[:-1])
+            offsets = unpadded_offsets
+            offsets[1:] -= padding
+            offsets[offsets<0] = 0
+            self.distribution = Distribution(axis, sizes, offsets, unpadded_sizes, 
+                                             unpadded_offsets)
+
+        # calculate overall shape
+        total_axis_size = np.sum(self.unpadded_sizes)
+        self.shape = self._tuple_replace(shape, total_axis_size, self.axis)
 
 
     def __del__(self):
@@ -292,15 +304,10 @@ class MpiArray(object):
         """Total number of MPI processes, using self.comm object"""
         return self.comm.Get_size()
 
-
-    def is_root(self):
-        """Returns true if we are the root node, only valid when global 
-        array stored on single node."""
-        return self.mpi_rank == self.root
-
-    def is_distributed(self):
-        """Returns true if data is distributed"""
-        return self.distribution is not None 
+    @property
+    def dtype(self):
+        """dtype of array"""
+        return self.arr.dtype
 
     @property
     def ndim(self):
@@ -391,14 +398,14 @@ class MpiArray(object):
             return None
 
     @property
-    def unpadded_local_arr(self):
-        """Returns local array with padding removed.  If necessary, a 
+    def unpadded_arr(self):
+        """Returns array with padding removed.  If necessary, a 
         copy is made to keep data contiguous in memory.""" 
-        local_offset = self.unpadded_offset - self.offset
-        axis_slc = np.s_[local_offset:local_offset + self.unpadded_size]
-        unpadded_local_arr = self.local_arr[
+        offset = self.unpadded_offset - self.offset
+        axis_slc = np.s_[offset:offset + self.unpadded_size]
+        unpadded_arr = self.arr[
             self._tuple_replace((np.s_[:],)*self.ndim, axis_slc, self.axis)]
-        return np.require(unpadded_local_arr, requirements="C")
+        return np.require(unpadded_arr, requirements="C")
 
     @property
     def mpi_dtype(self):
@@ -410,73 +417,6 @@ class MpiArray(object):
         """Converts numpy type to MPI datatype"""
         return MPI._typedict[dtype.char]
     
-    @staticmethod
-    def fromglobalarray(global_arr, root=0, comm=None):
-        """Initializes MpiArray object from a global ndarray on a 
-        single MPI process.  Each process calls fromglobalarray and 
-        receives an MpiArray object that represents the full array.
-        
-        Parameters
-        ----------
-        global_arr : ndarray
-            Global array of full dataset loaded on a single MPI process.
-            Other MPI processes should pass in None.
-        root : int, optinal
-            Rank of root node that has the global array of data. 
-            Defaults to zero.
-        comm : MPI Comm object, optional
-            Comm object that defines MPI nodes and is used for 
-            communication.  If not provided, COMM_WORLD is used.
-        
-        Returns
-        -------
-        MpiArray
-            MpiArray object returned to all MPI processes.
-        """        
-        return MpiArray(global_arr, root=root, comm=comm)
-
-
-    @staticmethod
-    def fromlocalarrays(local_arr, axis=0, padding=0, distribution=None, comm=None):
-        """Initializing MpiArray from local arrays.  The local arrays 
-        must have been split along the given axis.  If distribution 
-        object given, that is used to determine how data is split.
-        Otherwise, the data must be split starting with rank zero and 
-        continuing in order of rank, following the axis and padding 
-        parameters.
-        
-        Parameters
-        ----------
-        local_arr : ndarray, optional
-            Local array of partial datasets loaded on each MPI process.
-            These arrays should already be split on a an axis with
-            padding.
-        axis : int, optional
-            Only used if distribution is None.  Specifies the axis used 
-            to load distributed data. Defaults to zero.
-        padding : int, optional
-            Only used if distribution is None.  Specifies the padding 
-            used to load distributed data.  This is the overlap 
-            between the distributed data on each MPI process.  Defaults 
-            to zero.
-        distribution : Distribution, optional
-            Class instance that sets how data is distributed.  
-            Defines how the data is split along the axis among the 
-            different MPI processes.  If not given, default Distribution 
-            is constructed from axis and padding.            
-        comm : MPI Comm object, optional
-            Comm object that defines MPI nodes and is used for 
-            communication.  If not provided, COMM_WORLD is used.
-        
-        Returns
-        -------
-        MpiArray
-            MpiArray object returned to all MPI processes.
-        """        
-        return MpiArray(local_arr=local_arr, axis=axis, padding=padding, distribution=distribution, 
-                        comm=comm)
-
-
     def copy(self, deep=True):
         """Create a copy of MpiArray.  If deep=True, the data is copied 
         as well.
@@ -492,16 +432,11 @@ class MpiArray(object):
         MpiArray
             MpiArray object returned to all MPI processes.
         """
-        if deep and self.global_arr is not None:
-            global_arr = self.global_arr.copy()
+        if deep:
+            arr = self.arr.copy()
         else:
-            global_arr = self.global_arr
-        if deep and self.local_arr is not None:
-            local_arr = self.local_arr.copy()
-        else:
-            local_arr = self.local_arr
-        return MpiArray(global_arr, local_arr, distribution=self.distribution, root=self.root, 
-                        comm=self.comm)
+            arr = self.arr
+        return MpiArray(arr, distribution=self.distribution, comm=self.comm)
 
 
     def scatter(self, axis=0, padding=0):
@@ -509,7 +444,6 @@ class MpiArray(object):
         MPI processes.  If data is already scattered, rescatters it in a 
         distributed manner.  Will replace any existing padding with new 
         padding from the unpadded region. 
-        NOTE: global_arr deleted from root node if present.
         
         Parameters
         ----------
@@ -524,7 +458,7 @@ class MpiArray(object):
         Returns
         -------
         ndarray
-            Local array of data for each MPI process.
+            Array of data for each MPI process.
         """        
         # create Distribution from axis and padding
         distribution = Distribution.default(self.shape, self.mpi_size, axis, padding)
@@ -535,7 +469,6 @@ class MpiArray(object):
         """Scatter array using distribution to MPI processes.  If 
         data is already scattered, rescatters it in a distributed 
         manner. 
-        NOTE: global_arr deleted from root node if present.
         
         Parameters
         ----------
@@ -546,40 +479,8 @@ class MpiArray(object):
         Returns
         -------
         ndarray
-            Local array of data for each MPI process.
-        """        
-        if not self.is_distributed():
-            return self._scatterfromglobal(distribution)
-        else:
-            return self._rescatter(distribution)
-
-
-    def _scatterfromglobal(self, distribution):
-        """Scatter array from global array using distribution"""
-        # root node has global_arr
-        # scatter data to nodes on axis
-        self.distribution = distribution
-        self.local_arr = np.empty(self._calc_local_arr_shape(), dtype=self.dtype)
-        # send to all nodes
-        if self.is_root():
-            reqs = []
-            sizes = self.sizes # only calculate once
-            offsets = self.offsets # only calculate once
-            for i in range(self.mpi_size):
-                mpi_dtype = self._mpi_dtype_subarray_axis(self.shape, self.axis, sizes[i])
-                if mpi_dtype is None:
-                    # nothing to send
-                    continue
-                reqs.append(self.comm.Isend([self.global_arr, 1, offsets[i], mpi_dtype], i))
-        if self.local_arr.size: # something to receive
-            self.comm.Recv(self.local_arr, source=self.root)
-        if self.is_root():
-            MPI.Request.Waitall(reqs)
-        self.delete_global()
-        return self.local_arr
-    
-    
-    def _rescatter(self, distribution):
+            Array of data for each MPI process.
+        """
         if self.axis != distribution.axis:
             return self._rescatternewaxis(distribution)
         else:
@@ -590,37 +491,37 @@ class MpiArray(object):
         """Redistribute data on a new axis.  Do NOT resend padded data.
         """
         # update values and reinitialize local_arr
-        new_local_arr = np.empty(self._calc_local_arr_shape(distribution), dtype=self.dtype)
+        new_arr = np.empty(self._calc_arr_shape(distribution), dtype=self.dtype)
         mpi_dtypes = [] #store them to be deleted later
         requests = []
         for r in xrange(self.mpi_size):
             # do non-blocking sends
-            subsize = list(self.local_arr.shape)
+            subsize = list(self.arr.shape)
             subsize[distribution.axis] = distribution.sizes[r]
             subsize[self.axis] = self.unpadded_size
             if np.prod(subsize): # if we have something to send
                 suboffset = [0] * self.ndim
                 suboffset[distribution.axis] = distribution.offsets[r]
                 suboffset[self.axis] = self.unpadded_offset - self.offset # remove padding
-                mpi_dtype = self.mpi_dtype.Create_subarray(self.local_arr.shape, subsize, 
+                mpi_dtype = self.mpi_dtype.Create_subarray(self.arr.shape, subsize, 
                                                            suboffset)
                 mpi_dtype.Commit()
-                requests.append(self.comm.Isend([self.local_arr, 1, 0, mpi_dtype], r))
+                requests.append(self.comm.Isend([self.arr, 1, 0, mpi_dtype], r))
                 mpi_dtypes.append(mpi_dtype)
         for r in xrange(self.mpi_size):
             # do non-blocking recvs
-            mpi_dtype = self._mpi_dtype_subarray_axis(new_local_arr.shape, self.axis, 
+            mpi_dtype = self._mpi_dtype_subarray_axis(new_arr.shape, self.axis, 
                                                       self.unpadded_sizes[r])
             if mpi_dtype is not None:
                 requests.append(self.comm.Irecv(
-                    [new_local_arr, 1, self.unpadded_offsets[r], mpi_dtype], r))
+                    [new_arr, 1, self.unpadded_offsets[r], mpi_dtype], r))
         MPI.Request.Waitall(requests)
         for mpi_dtype in mpi_dtypes:
             mpi_dtype.Free()
         # update to new distribution with new local_arr
         self.distribution = distribution
-        self.local_arr = new_local_arr
-        return self.local_arr
+        self.arr = new_arr
+        return self.arr
     
     
     def _rescattersameaxis(self, distribution):
@@ -630,8 +531,8 @@ class MpiArray(object):
         
         # calculate overlap regions for each MPI process
         # only send from unpadded data
-        # create a new array that will replace local_arr
-        recv_local_arr = np.empty(self._calc_local_arr_shape(distribution), dtype=self.dtype) 
+        # create a new array that will replace arr
+        recv_arr = np.empty(self._calc_arr_shape(distribution), dtype=self.dtype) 
         requests = []
         for recv_rank in range(self.mpi_size):
             for send_rank in range(self.mpi_size):
@@ -649,23 +550,23 @@ class MpiArray(object):
                         if self.mpi_rank == send_rank:
                             # set up send
                             mpi_dtype = self._mpi_dtype_subarray_axis(
-                                            self.local_arr.shape, self.axis, overlap_size)
+                                            self.arr.shape, self.axis, overlap_size)
                             if mpi_dtype is not None:
                                 send_offset = overlap_offset - self.offsets[send_rank]
                                 requests.append(self.comm.Isend(
-                                    [self.local_arr, 1, send_offset, mpi_dtype], recv_rank))
+                                    [self.arr, 1, send_offset, mpi_dtype], recv_rank))
                         if self.mpi_rank == recv_rank:
                             # set up recv
                             mpi_dtype = self._mpi_dtype_subarray_axis(
-                                recv_local_arr.shape, self.axis, overlap_size)
+                                recv_arr.shape, self.axis, overlap_size)
                             if mpi_dtype is not None:
                                 recv_offset = overlap_offset - new_offset
                                 requests.append(self.comm.Irecv(
-                                    [recv_local_arr, 1, recv_offset, mpi_dtype], send_rank))
+                                    [recv_arr, 1, recv_offset, mpi_dtype], send_rank))
         MPI.Request.Waitall(requests)
-        self.local_arr = recv_local_arr
+        self.arr = recv_arr
         self.distribution = distribution
-        return self.local_arr
+        return self.arr
         
 
     def scattermovezero(self, axis=0, padding=0):
@@ -675,14 +576,12 @@ class MpiArray(object):
         manner.  This function changes the shape of MpiArray.  The 
         following give the same local_arr to each MPI process.
         
-        mpiarray = fromglobalarray(arr)
-        local_arr = mpiarray.scattermovezero(axis, padding)
+        mpiarray = MpiArray(arr)
+        arr = mpiarray.scattermovezero(axis, padding)
         
         arr = np.moveaxis(arr, axis, 0)
-        mpiarray = fromglobalarray(arr)
-        local_arr = mpiarray.scatter(0, padding)
-
-        NOTE: global_arr deleted from root node if present.        
+        mpiarray = MpiArray(arr)
+        arr = mpiarray.scatter(0, padding)
         
         Parameters
         ----------
@@ -697,7 +596,7 @@ class MpiArray(object):
         Returns
         -------
         ndarray
-            Local array of data for each MPI process.
+            Array of data for each MPI process.
         """
         distribution = Distribution.default(self.shape, self.mpi_size, axis, padding)
         return self.scattervmovezero(distribution)
@@ -710,15 +609,14 @@ class MpiArray(object):
         manner.  This function changes the shape of MpiArray.  The 
         following give the same local_arr to each MPI process.
         
-        mpiarray = fromglobalarray(arr)
-        local_arr = mpiarray.scattervmovezero(distribution)
+        mpiarray = MpiArray(arr)
+        arr = mpiarray.scattervmovezero(distribution)
         
         arr = np.moveaxis(arr, distribution.axis, 0)
-        mpiarray = fromglobalarray(arr)
+        mpiarray = MpiArray(arr)
         distribution.axis = 0
-        local_arr = mpiarray.scatterv(distribution)
+        arr = mpiarray.scatterv(distribution)
 
-        NOTE: global_arr deleted from root node if present.        
         NOTE: self.distribution will be replaced with static 
         distribution with axis of zero. 
         
@@ -731,7 +629,7 @@ class MpiArray(object):
         Returns
         -------
         ndarray
-            Local array of data for each MPI process.
+            Array of data for each MPI process.
         """         
         if distribution.axis == 0:
             # just do normal scatter
@@ -745,23 +643,11 @@ class MpiArray(object):
         new_distribution = Distribution.fromdistribution(distribution)
         new_distribution.axis = 0
         
-        if not self.is_distributed():
-            # send global_arr from root and moveaxis to zero
-            cur_shape = self.shape #store current shape for sending
-            self.distribution = new_distribution
-            self.shape = new_shape
-            self.local_arr = np.empty(self._calc_local_arr_shape(), dtype=self.dtype)
-            # create subarray for a single "col" of axis
-            mpi_dtype = self._mpi_dtype_subarray_axis(cur_shape, axis=distribution.axis)
-            if mpi_dtype is not None:
-                self.comm.Scatterv([self.global_arr, self.sizes, self.offsets, mpi_dtype],
-                                   [self.local_arr, self.mpi_dtype], root=self.root)
-            self.delete_global()
-        elif self.axis == distribution.axis:
+        if self.axis == distribution.axis:
             # data already distributed along axis
             # first move it to the correct orientation
-            self.local_arr = np.moveaxis(self.local_arr, distribution.axis, 0)
-            self.local_arr = np.require(self.local_arr, requirements="C")
+            self.arr = np.moveaxis(self.arr, distribution.axis, 0)
+            self.arr = np.require(self.arr, requirements="C")
             # now update local distribution to reflect axis change
             self.shape = new_shape
             self.distribution = Distribution.fromdistribution(self.distribution)
@@ -771,27 +657,24 @@ class MpiArray(object):
         else:
             # data is distributed along self.axis
             # need to scatter along axis and move axis to axis 0
-            new_local_arr = np.empty(self._calc_local_arr_shape(new_distribution, new_shape), 
-                                     dtype=self.dtype)
+            new_arr = np.empty(self._calc_arr_shape(new_distribution, new_shape), dtype=self.dtype)
             mpi_dtypes = [] #store them to be deleted later
             requests = []
             for r in xrange(self.mpi_size):
                 # do non-blocking sends
-                subsize = list(self.local_arr.shape)
+                subsize = list(self.arr.shape)
                 subsize[distribution.axis] = 1
                 subsize[self.axis] = self.unpadded_size
                 if np.prod(subsize) and new_distribution.sizes[r]: # if we have something to send
                     suboffset = [0] * self.ndim
                     suboffset[self.axis] = self.unpadded_offset - self.offset # remove padding
-                    mpi_dtype = self.mpi_dtype.Create_subarray(self.local_arr.shape, subsize, 
-                                                               suboffset)
+                    mpi_dtype = self.mpi_dtype.Create_subarray(self.arr.shape, subsize, suboffset)
                     mpi_dtype = mpi_dtype.Create_resized(
-                                    0, int(np.prod(self.local_arr.shape[distribution.axis+1:])) 
+                                    0, int(np.prod(self.arr.shape[distribution.axis+1:])) 
                                     * self.dtype.itemsize)
                     mpi_dtype.Commit()
                     requests.append(self.comm.Isend(
-                        [self.local_arr, distribution.sizes[r], distribution.offsets[r], mpi_dtype],
-                        r))
+                        [self.arr, distribution.sizes[r], distribution.offsets[r], mpi_dtype], r))
                     mpi_dtypes.append(mpi_dtype)
             # calculate where the current axis moved to
             moved_axis = self.axis
@@ -799,22 +682,22 @@ class MpiArray(object):
                 moved_axis += 1
             for r in xrange(self.mpi_size):
                 # do non-blocking recvs
-                mpi_dtype = self._mpi_dtype_subarray_axis(new_local_arr.shape, moved_axis, 
+                mpi_dtype = self._mpi_dtype_subarray_axis(new_arr.shape, moved_axis, 
                                                           self.unpadded_sizes[r])
                 if mpi_dtype is not None:
                     requests.append(self.comm.Irecv(
-                        [new_local_arr, 1, self.unpadded_offsets[r], mpi_dtype], r))
+                        [new_arr, 1, self.unpadded_offsets[r], mpi_dtype], r))
             MPI.Request.Waitall(requests)
             for mpi_dtype in mpi_dtypes:
                 mpi_dtype.Free()
-            self.local_arr = new_local_arr
+            self.arr = new_arr
             self.distribution = new_distribution
             self.shape = new_shape
 
-        return self.local_arr
+        return self.arr
 
 
-    def gather(self, root=0, delete_local=False):
+    def gather(self, root=0):
         """Gather global array to MPI process with rank of root.
         
         Parameters
@@ -822,11 +705,6 @@ class MpiArray(object):
         root : int, optional
             Rank of node receiving the global array.  Needs to be set 
             by every MPI process when calling gather.
-        delete_local : bool, optional
-            If False, MpiArray is not modified by calling gather.
-            If True, MpiArray object will reset to a global mode, 
-            similar to right after fromglobalarray where the whole 
-            dataset is only stored on the root node.
         
         Returns
         -------
@@ -835,42 +713,22 @@ class MpiArray(object):
             All other MPI processes are returned None.
         """         
         global_arr = None
-        if not self.is_distributed():
-            # array hasn't been distributed, check root
-            if self.root == root:
-                # array already in correct MPI process
-                global_arr = self.global_arr
-            else:
-                # array not in correct MPI process
-                if self.is_root():
-                    # send data to new root node
-                    self.comm.Send(self.global_arr, dest=root)
-                elif self.mpi_rank == root:
-                    # get data from old root node
-                    global_arr = np.empty(self.shape, dtype=self.dtype)
-                    self.comm.Recv(global_arr, source=self.root)
-        else:
-            # arr is distributed, gather from local_arrs
-            if root == self.mpi_rank:
-                global_arr = np.empty(self.shape, dtype=self.dtype)
-                requests = []
-                sizes = self.unpadded_sizes # only calculate once
-                offsets = self.unpadded_offsets # only calculate once
-                for i in range(self.mpi_size):
-                    mpi_dtype = self._mpi_dtype_subarray_axis(size=sizes[i])
-                    if mpi_dtype is not None:
-                        requests.append(self.comm.Irecv([global_arr, 1, offsets[i], mpi_dtype], i))
-            # each node sets up send, root node receives
-            unpadded_local_arr = self.unpadded_local_arr
-            if unpadded_local_arr.size: # check for something to send
-                self.comm.Send([unpadded_local_arr, self.mpi_dtype], dest=root)
-            if root == self.mpi_rank:
-                MPI.Request.Waitall(requests)
+        if root == self.mpi_rank:
+            global_arr = np.empty(self.shape, dtype=self.dtype)
+            requests = []
+            sizes = self.unpadded_sizes # only calculate once
+            offsets = self.unpadded_offsets # only calculate once
+            for i in range(self.mpi_size):
+                mpi_dtype = self._mpi_dtype_subarray_axis(size=sizes[i])
+                if mpi_dtype is not None:
+                    requests.append(self.comm.Irecv([global_arr, 1, offsets[i], mpi_dtype], i))
+        # each node sets up send, root node receives
+        unpadded_arr = self.unpadded_arr
+        if unpadded_arr.size: # check for something to send
+            self.comm.Send([unpadded_arr, self.mpi_dtype], dest=root)
+        if root == self.mpi_rank:
+            MPI.Request.Waitall(requests)
         
-        if delete_local:
-            self.global_arr = global_arr
-            self.root = root
-            self.delete_local()
         return global_arr
 
 
@@ -890,21 +748,15 @@ class MpiArray(object):
             row_size = int(np.prod(self.shape[1:]))
             recv_sizes = self.unpadded_sizes * row_size
             recv_offsets = self.unpadded_offsets * row_size
-            self.comm.Allgatherv([self.unpadded_local_arr, self.mpi_dtype],
+            self.comm.Allgatherv([self.unpadded_arr, self.mpi_dtype],
                                  [global_arr, recv_sizes, recv_offsets, self.mpi_dtype])
         else:
-            if self.axis is not None:
-                # data split along non-zero axis.  Needs a different datatype per node,
-                # so Allgatherv can't be used.  Instead, gather to a single node and 
-                # then Bcast to all nodes.  This should scale on large clusters, whereas 
-                # a large number of sends would not.
-                global_arr = self.gather(0)
-                root = 0
-            else:
-                # data stored globally on root node
-                root = self.root
-                if self.is_root():
-                    global_arr = self.global_arr
+            # data split along non-zero axis.  Needs a different datatype per node,
+            # so Allgatherv can't be used.  Instead, gather to a single node and 
+            # then Bcast to all nodes.  This should scale on large clusters, whereas 
+            # a large number of sends would not.
+            global_arr = self.gather(0)
+            root = 0
             if self.mpi_rank != root:
                 # initialize global_arr on all non-root nodes
                 global_arr = np.empty(self.shape, dtype=self.dtype)
@@ -912,21 +764,9 @@ class MpiArray(object):
             self.comm.Bcast([global_arr, self.mpi_dtype], root=root)
         return global_arr
 
-
-    def delete_local(self):
-        """Delete local arrays"""
-        self.local_arr = None
-        self.padding = 0
-        self.distribution = None
-
-
-    def delete_global(self):
-        """Delete global array"""
-        self.global_arr = None
-
     
-    def _calc_local_arr_shape(self, distribution=None, shape=None):
-        """Calculate local array shape from global array shape and 
+    def _calc_arr_shape(self, distribution=None, shape=None):
+        """Calculate array shape from global array shape and 
         distribution parameters."""
         if shape is None:
             shape = self.shape
@@ -963,7 +803,3 @@ class MpiArray(object):
         """Replace element in tuple and return new tuple"""
         return t[:index] + (value,) + t[index+1:]
 
-
-# create module level copies of loading functions
-fromlocalarrays = MpiArray.fromlocalarrays
-fromglobalarray = MpiArray.fromglobalarray 

@@ -46,7 +46,7 @@ mpi_rank = comm.Get_rank()
 mpi_size = comm.Get_size()
 
 import logging
-logging.basicConfig(format='%03d: %(asctime)s - %(levelname)s - %(name)s - %(funcName)s - %(message)s'%(mpi_rank),
+logging.basicConfig(format='%03d:'%(mpi_rank) + '%(asctime)s - %(levelname)s - %(name)s - %(funcName)s - %(message)s',
                     level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,7 @@ class TestMpiArray(unittest.TestCase):
             arr = np.random.rand(*shape)
         else:
             arr = None
-        mpiarray = MpiArray.fromglobalarray(arr)
+        mpiarray = MpiArray(arr)
         # share array to all MPI nodes
         arr = comm.bcast(arr)
         return arr, mpiarray
@@ -133,7 +133,7 @@ class TestMpiArray(unittest.TestCase):
             shape = (mpi_size*size, 10, 8)
             arr = np.random.rand(*shape)
             local_arr = arr[max(0, mpi_rank*size-padding):(mpi_rank+1)*size+padding]
-            mpiarray = MpiArray.fromlocalarrays(local_arr, padding=padding)
+            mpiarray = MpiArray(local_arr, padding=padding)
             self.check_fields(arr, mpiarray)
  
  
@@ -149,8 +149,8 @@ class TestMpiArray(unittest.TestCase):
                     self.check_fields(arr, mpiarray)
                     test_local_arr = self.calc_scatter(arr, axis2, padding2)
                     assert_array_equal(test_local_arr, local_arr, "scatter axis: %d"%axis)
-    
      
+      
     def test_scatter(self):
         # load from array, scatter axis, and check global and local values
         size = 3
@@ -160,51 +160,36 @@ class TestMpiArray(unittest.TestCase):
             self.check_fields(arr, mpiarray)
             test_local_arr = self.calc_scatter(arr, axis, padding)
             assert_array_equal(test_local_arr, local_arr, "scatter axis: %d"%axis)
-  
-  
+   
+   
     def test_gather_from_global(self):
         size = 3
-        for delete_local in (True, False): 
-            for shape, axis, _ in self.scatter_params(size):
-                arr, mpiarray = self.load_fromglobalarray(shape)
-                for rank in range(mpi_size):
-                    test_arr = mpiarray.gather(rank, delete_local)
-                    self.check_fields(arr, mpiarray)
-                    if mpi_rank == rank:
-                        self.check_fields(test_arr, mpiarray)
-                        assert_array_equal(test_arr, arr, "gather axis: %d, rank: %d"%(axis, rank))
-                    if delete_local:
-                        assert mpiarray.local_arr is None
-                        assert mpiarray.root == rank
-                    else:
-                        assert mpiarray.local_arr is None
-                        assert mpiarray.root == 0
-  
-  
+        for shape, axis, _ in self.scatter_params(size):
+            arr, mpiarray = self.load_fromglobalarray(shape)
+            for rank in range(mpi_size):
+                test_arr = mpiarray.gather(rank)
+                self.check_fields(arr, mpiarray)
+                if mpi_rank == rank:
+                    self.check_fields(test_arr, mpiarray)
+                    assert_array_equal(test_arr, arr, "gather axis: %d, rank: %d"%(axis, rank))
+ 
+   
     def test_gather_from_scattered(self):
         # load from array, scatter axis, gather, check arr is the same
         size = 3
-        for delete_local in (True, False): 
-            for shape, axis, padding in self.scatter_params(size):
-                arr, mpiarray = self.load_fromglobalarray(shape)
-                mpiarray.scatter(axis, padding=padding)
-                for rank in range(mpi_size):
-                    old_root = mpiarray.root
-                    test_arr = mpiarray.gather(rank, delete_local)
-                    self.check_fields(arr, mpiarray)
-                    if rank == mpi_rank:
-                        self.check_fields(test_arr, mpiarray)
-                        assert_array_equal(test_arr, arr, "gather axis: %d, rank: %d"%(axis, rank))
-                    else:
-                        assert test_arr is None
-                    if delete_local:
-                        assert mpiarray.local_arr is None
-                        assert mpiarray.root == rank
-                    else:
-                        assert mpiarray.local_arr is not None
-                        assert mpiarray.root == old_root
- 
- 
+        for shape, axis, padding in self.scatter_params(size):
+            arr, mpiarray = self.load_fromglobalarray(shape)
+            mpiarray.scatter(axis, padding=padding)
+            for rank in range(mpi_size):
+                test_arr = mpiarray.gather(rank)
+                self.check_fields(arr, mpiarray)
+                if rank == mpi_rank:
+                    self.check_fields(test_arr, mpiarray)
+                    assert_array_equal(test_arr, arr, "gather axis: %d, rank: %d"%(axis, rank))
+                else:
+                    assert test_arr is None
+  
+  
     def test_allgather(self):
         # load from array, allgather, scatter, allgather
         size = 3
@@ -217,8 +202,8 @@ class TestMpiArray(unittest.TestCase):
             test_arr = mpiarray.allgather()
             self.check_fields(test_arr, mpiarray)
             assert_array_equal(test_arr, arr)
-  
-  
+   
+   
     def test_scattermovezero_global(self):
         # load from array, scattermovezero, test
         size = 3
@@ -229,8 +214,8 @@ class TestMpiArray(unittest.TestCase):
             self.check_fields(arr, mpiarray)
             test_local_arr = self.calc_scatter(arr, 0, padding)
             assert_array_equal(test_local_arr, local_arr, "scattermovezero axis: %d"%axis)
-              
-  
+
+   
     def test_scattermovezero_local(self):
         # load from array, scatter, scattermovezero, test
         size = 3
@@ -239,12 +224,12 @@ class TestMpiArray(unittest.TestCase):
             mpiarray.scatter(axis, padding=padding)
             for axis2 in range(len(shape)-1, 0, -1):
                 local_arr = mpiarray.scattermovezero(axis2, padding)
-                arr = np.moveaxis(arr, axis, 0)
+                arr = np.moveaxis(arr, axis2, 0)
                 self.check_fields(arr, mpiarray)
                 test_local_arr = self.calc_scatter(arr, 0, padding)
                 assert_array_equal(test_local_arr, local_arr, "scattermove0zeroaxis: %d"%axis2)
-   
-   
+    
+    
     def test_copy(self):
         # load global_arr, copy, test, change val, test 
         # scatter, copy, test, change val, test
@@ -258,40 +243,39 @@ class TestMpiArray(unittest.TestCase):
             # test
             self.check_fields(arr, mpiarray)
             self.check_fields(mpiarray, mpiarray2)
-            assert_array_equal(mpiarray.local_arr, mpiarray2.local_arr)
+            assert_array_equal(mpiarray.arr, mpiarray2.arr)
             gathered_arr = mpiarray2.gather(0)
             if mpi_rank == 0:
                 assert_array_equal(arr, gathered_arr)
                 # change value in mpiarray2 to check if deep copy
-                self.assertEqual(mpiarray.global_arr[0, 0, 0], mpiarray2.global_arr[0, 0, 0])
-                mpiarray2.global_arr[0,0,0] += 1
+                self.assertEqual(mpiarray.arr[0, 0, 0], mpiarray2.arr[0, 0, 0])
+                mpiarray2.arr[0,0,0] += 1
                 # test
                 if deep:
-                    self.assertNotEqual(mpiarray.global_arr[0, 0, 0], mpiarray2.global_arr[0, 0, 0])
+                    self.assertNotEqual(mpiarray.arr[0, 0, 0], mpiarray2.arr[0, 0, 0])
                 else:
-                    self.assertEqual(mpiarray.global_arr[0, 0, 0], mpiarray2.global_arr[0, 0, 0])
+                    self.assertEqual(mpiarray.arr[0, 0, 0], mpiarray2.arr[0, 0, 0])
             del mpiarray2
             # scatter tests
             for padding in (0, 1, 2):
                 for axis in (0, 1):
                     arr, mpiarray = self.load_fromglobalarray(shape)
                     mpiarray.scatter(axis, padding)
-                    mpiarray.delete_global() # make sure we are getting values from local_arr
                     mpiarray2 = mpiarray.copy(deep)
                     # test values
                     self.check_fields(arr, mpiarray)
                     self.check_fields(mpiarray, mpiarray2)
                     test_local_arr = self.calc_scatter(arr, axis, padding)
-                    assert_array_equal(test_local_arr, mpiarray.local_arr, "scatter axis: %d"%axis)
-                    assert_array_equal(test_local_arr, mpiarray2.local_arr, "scatter axis: %d"%axis)
+                    assert_array_equal(test_local_arr, mpiarray.arr, "scatter axis: %d"%axis)
+                    assert_array_equal(test_local_arr, mpiarray2.arr, "scatter axis: %d"%axis)
                     # change val and test again
-                    self.assertEqual(mpiarray.local_arr[0, 0, 0], mpiarray2.local_arr[0, 0, 0])
-                    mpiarray2.local_arr[0, 0, 0] += 1
+                    self.assertEqual(mpiarray.arr[0, 0, 0], mpiarray2.arr[0, 0, 0])
+                    mpiarray2.arr[0, 0, 0] += 1
                     if deep:
-                        self.assertNotEqual(mpiarray.local_arr[0, 0, 0], mpiarray2.local_arr[0, 0, 0])
+                        self.assertNotEqual(mpiarray.arr[0, 0, 0], mpiarray2.arr[0, 0, 0])
                     else:
-                        self.assertEqual(mpiarray.local_arr[0, 0, 0], mpiarray2.local_arr[0, 0, 0])
-                    mpiarray2.local_arr[0, 0, 0] = mpiarray.local_arr[0, 0, 0] #reset value
+                        self.assertEqual(mpiarray.arr[0, 0, 0], mpiarray2.arr[0, 0, 0])
+                    mpiarray2.arr[0, 0, 0] = mpiarray.arr[0, 0, 0] #reset value
 
 
 if __name__ == "__main__":
