@@ -208,7 +208,7 @@ class MpiArray(object):
         local_arr : ndarray, optional
             Local array of partial datasets loaded on each MPI process.
             These arrays should already be split on a an axis with
-            padding.  Currently, no custom distributions are supported.
+            padding.
         axis : int, optional
             Specifies the axis used to load distributed data. Only used 
             with local array loading.  Defaults to zero.
@@ -252,12 +252,12 @@ class MpiArray(object):
                 sizes = np.array(self.comm.allgather(size))
                 unpadded_sizes = sizes - padding
                 unpadded_sizes[1:-1] -= padding #no padding on edges
-                np.clip(unpadded_sizes, 0, size, unpadded_sizes)
+                unpadded_sizes[unpadded_sizes<0] = 0
                 unpadded_offsets = np.zeros((self.mpi_size,), dtype=np.int)
                 unpadded_offsets[1:] = np.cumsum(unpadded_sizes[:-1])
                 offsets = unpadded_offsets
                 offsets[1:] -= padding
-                np.clip(offsets, 0, size, offsets)
+                offsets[offsets<0] = 0
                 self.distribution = Distribution(axis, sizes, offsets, unpadded_sizes, 
                                                  unpadded_offsets)
             # calculate from local_arr sizes along axis
@@ -450,7 +450,7 @@ class MpiArray(object):
         local_arr : ndarray, optional
             Local array of partial datasets loaded on each MPI process.
             These arrays should already be split on a an axis with
-            padding.  Currently, no custom distributions are supported.
+            padding.
         axis : int, optional
             Only used if distribution is None.  Specifies the axis used 
             to load distributed data. Defaults to zero.
