@@ -415,7 +415,13 @@ class MpiArray(object):
     @staticmethod
     def numpy_to_mpi_dtype(dtype):
         """Converts numpy type to MPI datatype"""
-        return MPI._typedict[dtype.char]
+        if hasattr(MPI, '_typedict'):
+            mpi_dtype = MPI._typedict[np.dtype(dtype).char]
+        elif hasattr(MPI, '__TypeDict__'):
+	    mpi_dtype = MPI.__TypeDict__[np.dtype(dtype).char]
+        else:
+            raise ValueError('cannot convert numpy dtype to MPI dtype')
+        return mpi_dtype
     
     def copy(self, deep=True):
         """Create a copy of MpiArray.  If deep=True, the data is copied 
