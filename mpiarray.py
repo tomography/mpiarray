@@ -260,7 +260,7 @@ class MpiArray(object):
             if self.arr is None:
                 shape = empty_shape
                 self.arr = np.empty(shape, dtype=dtype) 
-        except Exception, e:
+        except Exception as e:
             logger.error("MpiArray: Failure while verifying shapes: %s" % str(shapes))
             raise e
         
@@ -291,7 +291,7 @@ class MpiArray(object):
 
     def __del__(self):
         # free cached MPI dtypes on delete
-        for mpi_dtype in self._mpi_dtypes_subarray.itervalues():
+        for mpi_dtype in self._mpi_dtypes_subarray.values():
             mpi_dtype.Free()
 
     @property
@@ -418,7 +418,7 @@ class MpiArray(object):
         if hasattr(MPI, '_typedict'):
             mpi_dtype = MPI._typedict[np.dtype(dtype).char]
         elif hasattr(MPI, '__TypeDict__'):
-	    mpi_dtype = MPI.__TypeDict__[np.dtype(dtype).char]
+            mpi_dtype = MPI.__TypeDict__[np.dtype(dtype).char]
         else:
             raise ValueError('cannot convert numpy dtype to MPI dtype')
         return mpi_dtype
@@ -500,7 +500,7 @@ class MpiArray(object):
         new_arr = np.empty(self._calc_arr_shape(distribution), dtype=self.dtype)
         mpi_dtypes = [] #store them to be deleted later
         requests = []
-        for r in xrange(self.mpi_size):
+        for r in range(self.mpi_size):
             # do non-blocking sends
             subsize = list(self.arr.shape)
             subsize[distribution.axis] = distribution.sizes[r]
@@ -514,7 +514,7 @@ class MpiArray(object):
                 mpi_dtype.Commit()
                 requests.append(self.comm.Isend([self.arr, 1, 0, mpi_dtype], r))
                 mpi_dtypes.append(mpi_dtype)
-        for r in xrange(self.mpi_size):
+        for r in range(self.mpi_size):
             # do non-blocking recvs
             mpi_dtype = self._mpi_dtype_subarray_axis(new_arr.shape, self.axis, 
                                                       self.unpadded_sizes[r])
@@ -666,7 +666,7 @@ class MpiArray(object):
             new_arr = np.empty(self._calc_arr_shape(new_distribution, new_shape), dtype=self.dtype)
             mpi_dtypes = [] #store them to be deleted later
             requests = []
-            for r in xrange(self.mpi_size):
+            for r in range(self.mpi_size):
                 # do non-blocking sends
                 subsize = list(self.arr.shape)
                 subsize[distribution.axis] = 1
@@ -686,7 +686,7 @@ class MpiArray(object):
             moved_axis = self.axis
             if self.axis < distribution.axis:
                 moved_axis += 1
-            for r in xrange(self.mpi_size):
+            for r in range(self.mpi_size):
                 # do non-blocking recvs
                 mpi_dtype = self._mpi_dtype_subarray_axis(new_arr.shape, moved_axis, 
                                                           self.unpadded_sizes[r])
