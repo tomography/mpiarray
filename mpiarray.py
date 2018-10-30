@@ -496,6 +496,8 @@ class MpiArray(object):
     def _rescatternewaxis(self, distribution):
         """Redistribute data on a new axis.  Do NOT resend padded data.
         """
+        # ensure self.arr is contiguous for sending
+        self.arr = np.require(self.arr, requirements="C")
         # update values and reinitialize local_arr
         new_arr = np.empty(self._calc_arr_shape(distribution), dtype=self.dtype)
         mpi_dtypes = [] #store them to be deleted later
@@ -534,7 +536,8 @@ class MpiArray(object):
         """Array already distributed on the correct axis, but have a 
         new distribution to match.  Will reset padding to come from
         unpadded areas."""
-        
+        # ensure self.arr is contiguous for sending
+        self.arr = np.require(self.arr, requirements="C")        
         # calculate overlap regions for each MPI process
         # only send from unpadded data
         # create a new array that will replace arr
@@ -640,7 +643,7 @@ class MpiArray(object):
         if distribution.axis == 0:
             # just do normal scatter
             return self.scatterv(distribution)
-        
+
         # calculate new shape after scatter
         new_shape = list(self.shape)
         new_shape.insert(0, new_shape.pop(distribution.axis))
@@ -661,6 +664,8 @@ class MpiArray(object):
             # now rescatter on same axis with new distribution
             self._rescattersameaxis(new_distribution)
         else:
+            # ensure self.arr is contiguous for sending
+            self.arr = np.require(self.arr, requirements="C")
             # data is distributed along self.axis
             # need to scatter along axis and move axis to axis 0
             new_arr = np.empty(self._calc_arr_shape(new_distribution, new_shape), dtype=self.dtype)
@@ -729,7 +734,7 @@ class MpiArray(object):
                 if mpi_dtype is not None:
                     requests.append(self.comm.Irecv([global_arr, 1, offsets[i], mpi_dtype], i))
         # each node sets up send, root node receives
-        unpadded_arr = self.unpadded_arr
+        unpadded_arr = self.unpadded_arr #NOTE: ensures contiguous
         if unpadded_arr.size: # check for something to send
             self.comm.Send([unpadded_arr, self.mpi_dtype], dest=root)
         if root == self.mpi_rank:
@@ -754,6 +759,7 @@ class MpiArray(object):
             row_size = int(np.prod(self.shape[1:]))
             recv_sizes = self.unpadded_sizes * row_size
             recv_offsets = self.unpadded_offsets * row_size
+            #NOTE: unpadded_arr ensures contiguous
             self.comm.Allgatherv([self.unpadded_arr, self.mpi_dtype],
                                  [global_arr, recv_sizes, recv_offsets, self.mpi_dtype])
         else:

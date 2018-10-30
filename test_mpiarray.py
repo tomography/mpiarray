@@ -81,17 +81,43 @@ class TestMpiArray(unittest.TestCase):
         sizes, offsets = Distribution.split_array_indices(arr.shape, mpi_size, axis, padding)
         slc = [np.s_[:]]*arr.ndim
         slc[axis] = np.s_[offsets[mpi_rank]:offsets[mpi_rank]+sizes[mpi_rank]]
-        return arr[slc]
+        return arr[tuple(slc)]
+
 
     def load_fromglobalarray(self, shape=(16, 16, 8)):
         # only rank zero provides the global_arr for loading
         if mpi_rank == 0:
-            arr = np.random.rand(*shape)
+        # load noncontiguous by default
+            if len(shape) <= 1:
+                # single dimension, just load it
+                arr = np.random.rand(*shape)
+            else:
+                # swap axis 0 and 1 to make noncontiguous (unless axis has length of 1...)
+                noncontiguous_shape = (shape[1], shape[0])
+                if len(shape) > 2:
+                    noncontiguous_shape += shape[2:]
+                arr = np.random.rand(*noncontiguous_shape)
+                arr = np.swapaxes(arr, 0, 1)
         else:
             arr = None
         mpiarray = MpiArray(arr)
         # share array to all MPI nodes
         arr = comm.bcast(arr)
+        return arr, mpiarray
+
+
+    def load_to_scattered(self, shape, axis=0, padding=0):
+        # load array to scattered form.  This loads noncontiguous for testing purposes.
+        arr, mpiarray = self.load_fromglobalarray(shape)
+        local_arr = mpiarray.scatter(axis, padding=padding)
+        if len(local_arr.shape) > 1:
+            # swap axis(0,1), then make contiguous, then swap back
+            new_local_arr = np.swapaxes(local_arr, 0, 1)
+            new_local_arr = np.require(new_local_arr, requirements="C")
+            new_local_arr = np.swapaxes(new_local_arr, 0, 1)
+            assert_array_equal(local_arr, new_local_arr) #sanity check
+            local_arr = new_local_arr
+            mpiarray = MpiArray(local_arr, distribution=mpiarray.distribution)
         return arr, mpiarray
 
 
@@ -141,8 +167,7 @@ class TestMpiArray(unittest.TestCase):
         # load from array, scatter axis, and check global and local values
         size = 3
         for shape, axis, padding in self.scatter_params(size):
-            arr, mpiarray = self.load_fromglobalarray(shape)
-            mpiarray.scatter(axis, padding=padding)
+            arr, mpiarray = self.load_to_scattered(shape, axis, padding)
             for axis2 in range(arr.ndim):
                 for padding2 in (0, 1, 2):
                     local_arr = mpiarray.scatter(axis2, padding2)
@@ -178,8 +203,7 @@ class TestMpiArray(unittest.TestCase):
         # load from array, scatter axis, gather, check arr is the same
         size = 3
         for shape, axis, padding in self.scatter_params(size):
-            arr, mpiarray = self.load_fromglobalarray(shape)
-            mpiarray.scatter(axis, padding=padding)
+            arr, mpiarray = self.load_to_scattered(shape, axis, padding)
             for rank in range(mpi_size):
                 test_arr = mpiarray.gather(rank)
                 self.check_fields(arr, mpiarray)
@@ -220,8 +244,7 @@ class TestMpiArray(unittest.TestCase):
         # load from array, scatter, scattermovezero, test
         size = 3
         for shape, axis, padding in self.scatter_params(size):
-            arr, mpiarray = self.load_fromglobalarray(shape)
-            mpiarray.scatter(axis, padding=padding)
+            arr, mpiarray = self.load_to_scattered(shape, axis, padding)
             for axis2 in range(len(shape)-1, 0, -1):
                 local_arr = mpiarray.scattermovezero(axis2, padding)
                 arr = np.moveaxis(arr, axis2, 0)

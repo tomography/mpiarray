@@ -12,7 +12,7 @@ The MpiArray object stores the metadata about the whole array and the distributi
   * MpiArray can re-scatter with different axis/padding in a distributed manner
 * Only the un-padded data is used when data is re-distributed through 
     scatter or gather (padding is discarded).
-* Data is always contiguous in memory
+* Data is always returned as contiguous in memory (input data may be noncontiguous)
 * An mpi4py comm object can be used to define which processes to use
 
 
@@ -69,4 +69,4 @@ Custom distributions can be used to specify how the data is distributed across a
 NOTE: The unpadded data should have a one-to-one correspondence to a single MPI process (data should only be present in a single unpadded region and all data should be represented by the unpadded regions). 
 
 Similar Python packages:
-MpiArray is similar to distarray.  The main difference is that mpiarray never uses pickling or Python slices to send data.  Everything is sent directly using MPI calls.  This is more efficient and supports large array sizes (distarray seemed to have a 4GB limit), however it requires that the arrays always be c contiguous in memory.  distarray has a more general set of array distributions supported.
+MpiArray is similar to distarray.  The main difference is that mpiarray never uses pickling or Python slices to send data.  Everything is sent directly using MPI calls.  This is more efficient and supports large array sizes (distarray seemed to have a 4GB limit).  distarray has a more general set of array distributions supported.
